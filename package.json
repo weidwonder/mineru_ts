@@ -1,0 +1,32 @@
+{
+  "name": "mineru-ts",
+  "version": "1.0.0",
+  "description": "TypeScript implementation of MinerU client for document parsing",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "ts-node src/test.ts"
+  },
+  "keywords": [
+    "pdf",
+    "ocr",
+    "vlm",
+    "document-parsing",
+    "mineru"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hyzyla/pdfium": "^1.0.0",
+    "axios": "^1.6.5",
+    "canvas": "^2.11.2",
+    "cheerio": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

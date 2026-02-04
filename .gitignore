@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+mineru-ts-output/
+.venv/
+.tmp-poppler/

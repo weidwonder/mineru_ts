@@ -2,6 +2,8 @@
 
 > MinerU 的 TypeScript 客户端，实现 VLM 驱动的 PDF 结构化解析，并尽量对齐 Python VLM 输出。
 
+注意：该实现并非官方实现。官方实现请参考 [mineru-vl-utils](https://github.com/opendatalab/mineru-vl-utils)。
+
 ## 📖 文档导航系统
 
 ### 阅读决策树

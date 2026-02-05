@@ -4,19 +4,35 @@
   "description": "TypeScript implementation of MinerU client for document parsing",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "ts-node src/test.ts"
+    "test": "ts-node src/test.ts",
+    "prepublishOnly": "npm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weidwonder/mineru_ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/weidwonder/mineru_ts/issues"
+  },
+  "homepage": "https://github.com/weidwonder/mineru_ts#readme",
   "keywords": [
     "pdf",
     "ocr",
     "vlm",
     "document-parsing",
-    "mineru"
+    "mineru",
+    "typescript"
   ],
-  "author": "",
+  "author": "weidwonder",
   "license": "MIT",
   "dependencies": {
     "@hyzyla/pdfium": "^1.0.0",

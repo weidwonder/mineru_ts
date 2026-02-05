@@ -11,7 +11,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
     "dev": "tsc --watch",
     "test": "ts-node src/test.ts",
     "prepublishOnly": "npm run build"

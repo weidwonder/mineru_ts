@@ -31,6 +31,9 @@ const client = new MinerUClient({
   dpi: 200,
   layoutImageSize: [1036, 1036],
   maxConcurrency: 10,
+  pageConcurrency: 1,
+  pageRetryLimit: 2,
+  skipFailedPages: true,
 });
 
 await client.initialize();
@@ -48,5 +51,8 @@ const client = new MinerUClient({
   maxConcurrency: 10,
   timeout: 600000,
   maxRetries: 3,
+  pageConcurrency: 1,
+  pageRetryLimit: 2,
+  skipFailedPages: true,
 });
 ```

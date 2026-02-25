@@ -190,6 +190,11 @@ export interface MinerUClientConfig {
   timeout?: number;
   maxRetries?: number;
   maxConcurrency?: number;
+
+  // 页级执行控制
+  pageConcurrency?: number; // 页面并发数（默认 1）
+  pageRetryLimit?: number; // 单页重试次数（默认 2）
+  skipFailedPages?: boolean; // 单页可重试错误耗尽后是否跳过（默认 true）
 }
 
 /** 解析结果 */

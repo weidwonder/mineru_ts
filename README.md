@@ -12,6 +12,8 @@
 - Python VLM 输出链路复刻（middle_json → Markdown）
 - 表格 OTSL → HTML 转换
 - 并发批量推理与重试机制
+- 页级并发控制与页级重试
+- 单页可重试错误可自动跳过（避免整文件失败）
 
 ## 📖 文档导航
 
@@ -115,6 +117,9 @@ interface MinerUClientConfig {
   maxImageEdgeRatio?: number;
   maxConcurrency?: number;
   maxRetries?: number;
+  pageConcurrency?: number;
+  pageRetryLimit?: number;
+  skipFailedPages?: boolean;
 }
 ```
 

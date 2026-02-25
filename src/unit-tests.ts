@@ -151,6 +151,18 @@ function hashImageBase64(imageBase64: string): string {
   return crypto.createHash('sha256').update(base64Data).digest('hex');
 }
 
+function createPageImages(count: number): PageImage[] {
+  const { buffer, base64, width, height } = createQuadrantImage(20);
+  return Array.from({ length: count }, (_, index) => ({
+    pageIndex: index,
+    width,
+    height,
+    scale: 1,
+    imageData: buffer,
+    base64,
+  }));
+}
+
 async function testTwoStepExtractUsesCroppedImages(): Promise<void> {
   const { buffer, base64, width, height } = createQuadrantImage(100);
   const pageImage: PageImage = {
@@ -549,6 +561,91 @@ async function testPredictRetriesOnEmptyResponse(): Promise<void> {
   assert.strictEqual(calls, 2);
 }
 
+async function testBatchTwoStepExtractRespectsPageConcurrency(): Promise<void> {
+  const client = new MinerUClient({
+    serverUrl: 'http://example.com',
+    pageConcurrency: 2,
+    pageRetryLimit: 0,
+  } as any);
+
+  let running = 0;
+  let peakRunning = 0;
+  (client as any).twoStepExtract = async () => {
+    running += 1;
+    peakRunning = Math.max(peakRunning, running);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    running -= 1;
+    return [
+      {
+        type: 'text',
+        bbox: [0, 0, 1, 1],
+        content: 'ok',
+      },
+    ];
+  };
+
+  const result = await client.batchTwoStepExtract(createPageImages(5));
+  assert.strictEqual(result.length, 5);
+  assert.ok(peakRunning <= 2, `页面并发应 <= 2，实际为 ${peakRunning}`);
+}
+
+async function testBatchTwoStepExtractSkipsRetryablePageError(): Promise<void> {
+  const client = new MinerUClient({
+    serverUrl: 'http://example.com',
+    pageConcurrency: 1,
+    pageRetryLimit: 1,
+    skipFailedPages: true,
+  } as any);
+
+  const attempts = new Map<number, number>();
+  (client as any).twoStepExtract = async (pageImage: PageImage) => {
+    const count = (attempts.get(pageImage.pageIndex) || 0) + 1;
+    attempts.set(pageImage.pageIndex, count);
+    if (pageImage.pageIndex === 1) {
+      throw new Error('Empty response from VLM server');
+    }
+    return [
+      {
+        type: 'text',
+        bbox: [0, 0, 1, 1],
+        content: `page-${pageImage.pageIndex}`,
+      },
+    ];
+  };
+
+  const result = await client.batchTwoStepExtract(createPageImages(3));
+  assert.strictEqual(result.length, 3);
+  assert.strictEqual(result[1]?.length, 0, '失败页应被跳过并返回空数组');
+  assert.strictEqual(attempts.get(1), 2, '失败页应按 pageRetryLimit 重试');
+}
+
+async function testBatchTwoStepExtractThrowsWhenSkipDisabled(): Promise<void> {
+  const client = new MinerUClient({
+    serverUrl: 'http://example.com',
+    pageConcurrency: 1,
+    pageRetryLimit: 1,
+    skipFailedPages: false,
+  } as any);
+
+  (client as any).twoStepExtract = async (pageImage: PageImage) => {
+    if (pageImage.pageIndex === 1) {
+      throw new Error('Empty response from VLM server');
+    }
+    return [
+      {
+        type: 'text',
+        bbox: [0, 0, 1, 1],
+        content: `page-${pageImage.pageIndex}`,
+      },
+    ];
+  };
+
+  await assert.rejects(
+    () => client.batchTwoStepExtract(createPageImages(3)),
+    /Empty response from VLM server/
+  );
+}
+
 async function run(): Promise<void> {
   const tests: Array<{ name: string; fn: () => Promise<void> | void }> = [
     { name: 'twoStepExtract 使用裁剪图像', fn: testTwoStepExtractUsesCroppedImages },
@@ -580,6 +677,9 @@ async function run(): Promise<void> {
     { name: '布局解析角度', fn: testParseLayoutDetectionAngle },
     { name: '内容填充跳过 list', fn: testApplyExtractedContentsSkipsList },
     { name: '空响应重试', fn: testPredictRetriesOnEmptyResponse },
+    { name: '页级并发受控', fn: testBatchTwoStepExtractRespectsPageConcurrency },
+    { name: '页级空响应可跳过', fn: testBatchTwoStepExtractSkipsRetryablePageError },
+    { name: '关闭跳过时抛错', fn: testBatchTwoStepExtractThrowsWhenSkipDisabled },
   ];
 
   for (const test of tests) {

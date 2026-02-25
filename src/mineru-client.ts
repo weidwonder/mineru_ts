@@ -19,10 +19,16 @@ import {
   ContentBlock,
   ParseResult,
   PageImage,
+  VLMRequestError,
   DEFAULT_PROMPTS,
   DEFAULT_SAMPLING_PARAMS,
   DEFAULT_SYSTEM_PROMPT,
 } from './types';
+
+const DEFAULT_PAGE_CONCURRENCY = 1;
+const DEFAULT_PAGE_RETRY_LIMIT = 2;
+const RETRYABLE_NETWORK_ERROR_PATTERN =
+  /EHOSTDOWN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network error/iu;
 
 export class MinerUClient {
   private vlmClient: VLMClient;
@@ -58,6 +64,15 @@ export class MinerUClient {
       timeout: config.timeout ?? 600000,
       maxRetries: config.maxRetries ?? 3,
       maxConcurrency: config.maxConcurrency ?? 100,
+      pageConcurrency: this.normalizePositiveInt(
+        config.pageConcurrency,
+        DEFAULT_PAGE_CONCURRENCY
+      ),
+      pageRetryLimit: this.normalizeNonNegativeInt(
+        config.pageRetryLimit,
+        DEFAULT_PAGE_RETRY_LIMIT
+      ),
+      skipFailedPages: config.skipFailedPages ?? true,
     };
 
     // 创建 VLM 客户端
@@ -431,17 +446,95 @@ export class MinerUClient {
    * 批量两步提取
    */
   async batchTwoStepExtract(pageImages: PageImage[]): Promise<ContentBlock[][]> {
-    const results: ContentBlock[][] = [];
+    const results: ContentBlock[][] = new Array(pageImages.length);
+    const pageConcurrency = this.config.pageConcurrency;
 
-    // 并发处理所有页面
-    const promises = pageImages.map((pageImage) =>
-      this.twoStepExtract(pageImage)
-    );
-
-    const allResults = await Promise.all(promises);
-    results.push(...allResults);
+    for (let i = 0; i < pageImages.length; i += pageConcurrency) {
+      const batch = pageImages.slice(i, i + pageConcurrency);
+      await Promise.all(
+        batch.map(async (pageImage, offset) => {
+          const pageIndex = i + offset;
+          try {
+            results[pageIndex] = await this.runPageWithRetry(pageImage);
+          } catch (error) {
+            if (this.config.skipFailedPages && this.isRetryablePageError(error)) {
+              const detail = error instanceof Error ? error.message : String(error);
+              console.warn(`⚠️ [Page ${pageImage.pageIndex}] Failed after retries, skipped: ${detail}`);
+              results[pageIndex] = [];
+              return;
+            }
+            throw error;
+          }
+        })
+      );
+    }
 
     return results;
+  }
+
+  private async runPageWithRetry(pageImage: PageImage): Promise<ContentBlock[]> {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= this.config.pageRetryLimit; attempt += 1) {
+      try {
+        return await this.twoStepExtract(pageImage);
+      } catch (error) {
+        lastError = error;
+        if (!this.isRetryablePageError(error) || attempt >= this.config.pageRetryLimit) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 1000));
+      }
+    }
+
+    throw (lastError as Error) ?? new Error(`Page ${pageImage.pageIndex} parse failed`);
+  }
+
+  private isRetryablePageError(error: unknown): boolean {
+    if (error instanceof Error && this.isEmptyResponseError(error.message)) {
+      return true;
+    }
+
+    if (error instanceof VLMRequestError) {
+      const details = this.toRecord(error.details);
+      const statusCode = details?.statusCode;
+      if (statusCode === undefined || statusCode === null) {
+        return true;
+      }
+      if (typeof statusCode === 'number' && (statusCode === 429 || statusCode >= 500)) {
+        return true;
+      }
+    }
+
+    if (error instanceof Error && RETRYABLE_NETWORK_ERROR_PATTERN.test(error.message)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isEmptyResponseError(message: string): boolean {
+    return /Empty response from VLM server/u.test(message);
+  }
+
+  private toRecord(value: unknown): Record<string, any> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    return value as Record<string, any>;
+  }
+
+  private normalizePositiveInt(value: unknown, fallback: number): number {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+      return Math.floor(value);
+    }
+    return fallback;
+  }
+
+  private normalizeNonNegativeInt(value: unknown, fallback: number): number {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return Math.floor(value);
+    }
+    return fallback;
   }
 
   /**

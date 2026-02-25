@@ -2,6 +2,10 @@
 
 ## 2026-02-25
 
+- v1.0.2
+  - 与 Python 客户端对齐：VLM `content` 为空时返回空字符串，不再抛出 `Empty response` 异常
+  - 修复布局阶段空响应导致的长时间指数退避重试问题，失败页可快速进入后续流程
+- v1.0.1
 - 新增页级并发控制（`pageConcurrency`，默认 1）
 - 新增页级重试配置（`pageRetryLimit`，默认 2）
 - 新增可选跳过失败页（`skipFailedPages`，默认 `true`）

@@ -16,6 +16,6 @@ MINERU_TEST_PDF=/path/to/your.pdf npm test
 
 ## ⚠️ 注意事项
 
-- VLM 服务偶发空响应时，客户端会做页级重试；重试耗尽后默认跳过该页并打印 warning
+- VLM 服务偶发空响应时，客户端会按空字符串处理，页面可能得到 0 blocks
 - 输出目录可通过 `MINERU_OUTPUT_DIR` 指定（默认 `./mineru-ts-output`）
 - 如果出现 `canvas.node` 版本不匹配，请执行 `npm rebuild canvas` 或删除 `node_modules` 后重装

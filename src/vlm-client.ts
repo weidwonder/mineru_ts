@@ -193,40 +193,42 @@ export class VLMClient {
       console.log(JSON.stringify(debugBody, null, 2));
     }
 
-    const maxEmptyRetries = this.config.maxRetries;
-    for (let attempt = 0; attempt <= maxEmptyRetries; attempt += 1) {
-      try {
-        const response = await this.client.post<ChatCompletionResponse>(
-          '/v1/chat/completions',
-          requestBody
+    try {
+      const response = await this.client.post<ChatCompletionResponse>(
+        '/v1/chat/completions',
+        requestBody
+      );
+
+      const content = response.data.choices?.[0]?.message?.content;
+      if (typeof content === 'string') {
+        return this.stripEndToken(content);
+      }
+      if (content === null || content === undefined) {
+        return '';
+      }
+      return String(content);
+    } catch (error: any) {
+      if (axios.isAxiosError(error)) {
+        const statusCode = error.response?.status;
+        const message = error.response?.data?.error?.message || error.message;
+        throw new VLMRequestError(
+          `VLM request failed (${statusCode}): ${message}`,
+          {
+            statusCode,
+            response: error.response?.data,
+          }
         );
-
-        const content = response.data.choices[0]?.message?.content;
-        if (content) {
-          return content;
-        }
-      } catch (error: any) {
-        if (axios.isAxiosError(error)) {
-          const statusCode = error.response?.status;
-          const message = error.response?.data?.error?.message || error.message;
-          throw new VLMRequestError(
-            `VLM request failed (${statusCode}): ${message}`,
-            {
-              statusCode,
-              response: error.response?.data,
-            }
-          );
-        }
-        throw new VLMRequestError(`VLM request failed: ${error.message}`, error);
       }
-
-      if (attempt < maxEmptyRetries) {
-        const delay = Math.pow(2, attempt + 1) * 1000;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
+      throw new VLMRequestError(`VLM request failed: ${error.message}`, error);
     }
+  }
 
-    throw new VLMRequestError('Empty response from VLM server');
+  private stripEndToken(content: string): string {
+    const endToken = process.env.MINERU_VLM_END_TOKEN ?? '<|im_end|>';
+    if (endToken && content.endsWith(endToken)) {
+      return content.slice(0, -endToken.length);
+    }
+    return content;
   }
 
   /**

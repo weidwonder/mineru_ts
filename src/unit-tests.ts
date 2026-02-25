@@ -543,22 +543,19 @@ function testApplyExtractedContentsSkipsList(): void {
   assert.strictEqual(blocks[2].content, '标题二');
 }
 
-async function testPredictRetriesOnEmptyResponse(): Promise<void> {
+async function testPredictReturnsEmptyContentWithoutRetry(): Promise<void> {
   const client = new VLMClient({ serverUrl: 'http://example.com' });
   (client as any).modelName = 'mock-model';
   let calls = 0;
   const axiosInstance = (client as any).client;
   axiosInstance.post = async () => {
     calls += 1;
-    if (calls === 1) {
-      return { data: { choices: [{ message: { content: '' } }] } };
-    }
-    return { data: { choices: [{ message: { content: 'OK' } }] } };
+    return { data: { choices: [{ message: { content: '' } }] } };
   };
 
   const out = await client.predict('data:image/png;base64,AA==', '\nText Recognition:');
-  assert.strictEqual(out, 'OK');
-  assert.strictEqual(calls, 2);
+  assert.strictEqual(out, '');
+  assert.strictEqual(calls, 1);
 }
 
 async function testBatchTwoStepExtractRespectsPageConcurrency(): Promise<void> {
@@ -676,7 +673,7 @@ async function run(): Promise<void> {
     { name: 'OTSL 表格解析', fn: testOtslToHtml },
     { name: '布局解析角度', fn: testParseLayoutDetectionAngle },
     { name: '内容填充跳过 list', fn: testApplyExtractedContentsSkipsList },
-    { name: '空响应重试', fn: testPredictRetriesOnEmptyResponse },
+    { name: '空响应直接返回空串', fn: testPredictReturnsEmptyContentWithoutRetry },
     { name: '页级并发受控', fn: testBatchTwoStepExtractRespectsPageConcurrency },
     { name: '页级空响应可跳过', fn: testBatchTwoStepExtractSkipsRetryablePageError },
     { name: '关闭跳过时抛错', fn: testBatchTwoStepExtractThrowsWhenSkipDisabled },

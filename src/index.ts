@@ -5,6 +5,7 @@
 
 export { MinerUClient } from './mineru-client';
 export { VLMClient } from './vlm-client';
+export { loadMinerUConfigFromEnv, loadParseOptionsFromEnv } from './env-config';
 export {
   parseLayoutDetection,
   postProcessBlocks,

@@ -83,8 +83,43 @@ export interface PageImage {
   width: number;
   height: number;
   scale: number;
-  imageData: Buffer; // PNG 格式
+  imageData: Buffer; // 编码后的整页图像
   base64: string; // Base64 编码
+  rgbBuffer?: Buffer; // PDFium 渲染后的 RGB 缓冲区，用于页级裁剪缓存
+}
+
+export type CropImageFormat = 'jpeg' | 'png';
+
+export interface MinerUPagePerformanceMetrics {
+  pageIndex: number;
+  totalMs: number;
+  layoutMs: number;
+  cropMs: number;
+  contentMs: number;
+  imageSaveMs: number;
+  postProcessMs: number;
+  blocks: number;
+  extractedBlocks: number;
+  savedImages: number;
+}
+
+export interface MinerUPerformanceMetrics {
+  totalMs: number;
+  readMs: number;
+  renderMs: number;
+  pageImageEncodeMs: number;
+  layoutMs: number;
+  cropMs: number;
+  contentMs: number;
+  imageSaveMs: number;
+  postProcessMs: number;
+  middleJsonMs: number;
+  markdownMs: number;
+  pages: MinerUPagePerformanceMetrics[];
+}
+
+export interface ParseFileOptions {
+  pageLimit?: number; // 仅解析前 N 页，主要用于快速 benchmark
 }
 
 /** VLM 客户端配置 */
@@ -95,6 +130,7 @@ export interface VLMClientConfig {
   timeout?: number; // 请求超时（毫秒）
   maxRetries?: number; // 最大重试次数
   maxConcurrency?: number; // 最大并发数
+  keepAlive?: boolean; // 是否启用 HTTP keep-alive（默认 true）
 }
 
 /** OpenAI 兼容的消息格式 */
@@ -163,6 +199,9 @@ export interface MinerUClientConfig {
   outputDir?: string; // 输出目录（用于保存图片）
   minImageEdge?: number; // 裁剪后最小边长
   maxImageEdgeRatio?: number; // 裁剪后最大长宽比
+  cropImageFormat?: CropImageFormat; // 内容裁剪图编码格式（默认 jpeg）
+  cropImageQuality?: number; // JPEG 裁剪图质量（默认 0.75）
+  usePageCropCache?: boolean; // 是否复用页级 RGB 缓冲区裁剪（默认 true）
 
   // 采样参数
   samplingParams?: {
@@ -190,6 +229,10 @@ export interface MinerUClientConfig {
   timeout?: number;
   maxRetries?: number;
   maxConcurrency?: number;
+  keepAlive?: boolean;
+
+  // 性能日志
+  performanceLogging?: boolean;
 
   // 页级执行控制
   pageConcurrency?: number; // 页面并发数（默认 1）
@@ -208,6 +251,7 @@ export interface ParseResult {
   metadata: {
     totalPages: number;
     processingTime: number;
+    performance?: MinerUPerformanceMetrics;
   };
 }
 

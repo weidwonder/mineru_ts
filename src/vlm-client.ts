@@ -4,6 +4,8 @@
  */
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import * as http from 'http';
+import * as https from 'https';
 import {
   VLMClientConfig,
   ChatMessage,
@@ -26,13 +28,22 @@ export class VLMClient {
       apiKey: config.apiKey ?? '',
       timeout: config.timeout ?? 600000, // 10 分钟
       maxRetries: config.maxRetries ?? 3,
-      maxConcurrency: config.maxConcurrency ?? 100,
+      maxConcurrency: config.maxConcurrency ?? 10,
+      keepAlive: config.keepAlive ?? true,
+    };
+
+    const agentOptions = {
+      keepAlive: this.config.keepAlive,
+      maxSockets: this.config.maxConcurrency,
+      maxFreeSockets: Math.max(1, Math.ceil(this.config.maxConcurrency / 2)),
     };
 
     // 创建 axios 实例
     this.client = axios.create({
       baseURL: this.config.serverUrl,
       timeout: this.config.timeout,
+      httpAgent: new http.Agent(agentOptions),
+      httpsAgent: new https.Agent(agentOptions),
       headers: {
         'Content-Type': 'application/json',
         ...(this.config.apiKey && { Authorization: `Bearer ${this.config.apiKey}` }),
@@ -51,7 +62,10 @@ export class VLMClient {
       (response) => response,
       async (error: AxiosError) => {
         const config = error.config as any;
-        if (!config || !config.retry) {
+        if (!config) {
+          return Promise.reject(error);
+        }
+        if (!config.retry) {
           config.retry = 0;
         }
 
@@ -110,13 +124,19 @@ export class VLMClient {
       await this.initialize();
     }
 
-    // 转换图像为 Base64（移除 data URI 前缀）
+    // 转换图像为 Base64，并保留 data URI MIME 类型
     let imageBase64: string;
+    let imageMimeType = 'image/png';
     if (Buffer.isBuffer(imageData)) {
       imageBase64 = imageData.toString('base64');
     } else {
-      // 移除可能的 data URI 前缀
-      imageBase64 = imageData.replace(/^data:image\/\w+;base64,/, '');
+      const match = imageData.match(/^data:(image\/[\w.+-]+);base64,(.*)$/u);
+      if (match) {
+        imageMimeType = match[1];
+        imageBase64 = match[2];
+      } else {
+        imageBase64 = imageData;
+      }
     }
 
     const messages: ChatMessage[] = [];
@@ -136,7 +156,7 @@ export class VLMClient {
         {
           type: 'image_url',
           image_url: {
-            url: `data:image/png;base64,${imageBase64}`,
+            url: `data:${imageMimeType};base64,${imageBase64}`,
             detail: 'high',
           },
         },

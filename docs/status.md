@@ -9,6 +9,9 @@
 - 空响应兼容处理（与 Python 行为对齐：空 content 按空字符串处理）
 - 页级并发控制与页级重试
 - 单页可重试错误自动跳过（默认开启）
+- VLM HTTP keep-alive agent（默认开启）
+- 页级 RGB 裁剪缓存，避免同页多 block 重复解码整页图
+- 基础性能指标与 benchmark 脚本
 
 ## 📌 输出对齐现状
 
@@ -25,5 +28,7 @@
 
 - 解析与输出：`src/mineru-client.ts`
 - VLM 客户端：`src/vlm-client.ts`
+- 环境变量配置：`src/env-config.ts`
+- Benchmark：`scripts/benchmark.ts`
 - Python 兼容链路：`src/vlm-parity/*`
 - 测试脚本：`src/test.ts`

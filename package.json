@@ -14,6 +14,7 @@
     "build": "npm run clean && tsc",
     "dev": "tsc --watch",
     "test": "ts-node src/test.ts",
+    "benchmark": "ts-node scripts/benchmark.ts",
     "prepublishOnly": "npm run build"
   },
   "repository": {

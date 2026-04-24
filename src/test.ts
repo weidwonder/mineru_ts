@@ -6,14 +6,26 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { MinerUClient } from './mineru-client';
+import { loadMinerUConfigFromEnv, loadParseOptionsFromEnv } from './env-config';
 
 async function main() {
   // 测试配置
-  const serverUrl = process.env.MINERU_SERVER_URL || 'http://localhost:30000';
-  const outputDir = process.env.MINERU_OUTPUT_DIR || path.resolve('mineru-ts-output');
+  const config = loadMinerUConfigFromEnv({
+    outputDir: path.resolve('mineru-ts-output'),
+    dpi: 200,
+    layoutImageSize: [1036, 1036],
+    timeout: 600000,
+    performanceLogging: true,
+  });
+  const parseOptions = loadParseOptionsFromEnv();
+  const outputDir = config.outputDir || path.resolve('mineru-ts-output');
 
   console.log('=== MinerU TypeScript Client Test ===\n');
-  console.log(`Server URL: ${serverUrl}`);
+  console.log(`Server URL: ${config.serverUrl}`);
+  console.log(`Model Name: ${config.modelName || '(auto-discover)'}`);
+  console.log(`Page Concurrency: ${config.pageConcurrency ?? 2}`);
+  console.log(`Max VLM Concurrency: ${config.maxConcurrency ?? 10}`);
+  console.log(`Page Limit: ${parseOptions.pageLimit ?? '(all)'}`);
   const pdfPath = process.env.MINERU_TEST_PDF;
   if (!pdfPath) {
     throw new Error('请设置 MINERU_TEST_PDF 环境变量指向待解析的 PDF 文件');
@@ -25,21 +37,14 @@ async function main() {
   try {
     // 创建客户端
     console.log('1. Initializing MinerU client...');
-    const client = new MinerUClient({
-      serverUrl,
-      dpi: 200,
-      layoutImageSize: [1036, 1036],
-      outputDir,
-      maxConcurrency: 10,
-      timeout: 600000,
-    });
+    const client = new MinerUClient(config);
 
     await client.initialize();
     console.log('   ✓ Client initialized\n');
 
     // 解析 PDF
     console.log('2. Parsing PDF...');
-    const result = await client.parseFile(pdfPath);
+    const result = await client.parseFile(pdfPath, parseOptions);
     console.log(`   ✓ Parsed ${result.metadata.totalPages} pages`);
     console.log(
       `   ✓ Processing time: ${result.metadata.processingTime}ms\n`

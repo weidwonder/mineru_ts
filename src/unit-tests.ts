@@ -262,6 +262,31 @@ async function testCropImageResizesByNeed(): Promise<void> {
   assert.ok(img.width >= 28 && img.height >= 28, '裁剪后尺寸应满足最小边要求');
 }
 
+async function testPageCropCacheUsesRgbBuffer(): Promise<void> {
+  const client = new MinerUClient({ serverUrl: 'http://example.com' } as any);
+  const pageImage: PageImage = {
+    pageIndex: 0,
+    width: 2,
+    height: 2,
+    scale: 1,
+    imageData: Buffer.alloc(0),
+    base64: 'data:image/png;base64,not-valid',
+    rgbBuffer: Buffer.from([
+      255, 0, 0, 0, 255, 0,
+      0, 0, 255, 255, 255, 0,
+    ]),
+  };
+
+  const croppedBase64 = await (client as any).cropImageFromPageImage(
+    pageImage,
+    [0, 0, 1, 1]
+  );
+  assert.ok(
+    croppedBase64.startsWith('data:image/jpeg;base64,'),
+    '页级 RGB 缓存裁剪应直接生成 JPEG payload'
+  );
+}
+
 function testTableParsingRemovesOtslTags(): void {
   const raw =
     '<fcel>Buyer<fcel>PHONEPE PVT. LTD.<lcel><lcel><nl>' +
@@ -558,6 +583,21 @@ async function testPredictReturnsEmptyContentWithoutRetry(): Promise<void> {
   assert.strictEqual(calls, 1);
 }
 
+async function testPredictPreservesDataUriMimeType(): Promise<void> {
+  const client = new VLMClient({ serverUrl: 'http://example.com' });
+  (client as any).modelName = 'mock-model';
+  let sentUrl = '';
+  const axiosInstance = (client as any).client;
+  axiosInstance.post = async (_url: string, body: any) => {
+    sentUrl = body.messages[0].content[0].image_url.url;
+    return { data: { choices: [{ message: { content: 'ok' } }] } };
+  };
+
+  const out = await client.predict('data:image/jpeg;base64,AA==', '\nText Recognition:');
+  assert.strictEqual(out, 'ok');
+  assert.ok(sentUrl.startsWith('data:image/jpeg;base64,'), '应保留 JPEG MIME 类型');
+}
+
 async function testBatchTwoStepExtractRespectsPageConcurrency(): Promise<void> {
   const client = new MinerUClient({
     serverUrl: 'http://example.com',
@@ -648,6 +688,7 @@ async function run(): Promise<void> {
     { name: 'twoStepExtract 使用裁剪图像', fn: testTwoStepExtractUsesCroppedImages },
     { name: '图像块保存文件', fn: testImageBlockIsSaved },
     { name: '裁剪尺寸最小边', fn: testCropImageResizesByNeed },
+    { name: '页级裁剪缓存', fn: testPageCropCacheUsesRgbBuffer },
     { name: '表格解析清理 OTSL 标签', fn: testTableParsingRemovesOtslTags },
     { name: '表格解析保留合并列', fn: testTableParsingKeepsColspan },
     { name: '简单后处理也转换表格', fn: testSimplePostProcessConvertsTable },
@@ -674,6 +715,7 @@ async function run(): Promise<void> {
     { name: '布局解析角度', fn: testParseLayoutDetectionAngle },
     { name: '内容填充跳过 list', fn: testApplyExtractedContentsSkipsList },
     { name: '空响应直接返回空串', fn: testPredictReturnsEmptyContentWithoutRetry },
+    { name: '保留 data URI MIME 类型', fn: testPredictPreservesDataUriMimeType },
     { name: '页级并发受控', fn: testBatchTwoStepExtractRespectsPageConcurrency },
     { name: '页级空响应可跳过', fn: testBatchTwoStepExtractSkipsRetryablePageError },
     { name: '关闭跳过时抛错', fn: testBatchTwoStepExtractThrowsWhenSkipDisabled },

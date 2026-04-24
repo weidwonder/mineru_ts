@@ -1,5 +1,15 @@
 # changelog
 
+## 2026-04-24
+
+- 性能优化
+  - 默认 `pageConcurrency` 调整为 2，`maxConcurrency` 调整为 10
+  - VLM HTTP client 默认启用 HTTP/HTTPS keep-alive agent
+  - 新增页级 RGB 裁剪缓存，减少同页多 block 重复整页解码
+  - 内容裁剪 payload 默认改为 JPEG 0.75，可配置回退
+  - 新增环境变量配置入口与 `npm run benchmark`
+  - `ParseResult.metadata.performance` 增加阶段耗时统计
+
 ## 2026-02-25
 
 - v1.0.2

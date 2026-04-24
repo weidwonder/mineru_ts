@@ -115,19 +115,44 @@ interface MinerUClientConfig {
   layoutImageSize?: [number, number];
   minImageEdge?: number;
   maxImageEdgeRatio?: number;
-  maxConcurrency?: number;
+  cropImageFormat?: 'jpeg' | 'png';
+  cropImageQuality?: number;
+  usePageCropCache?: boolean;
+  maxConcurrency?: number;      // 默认 10
   maxRetries?: number;
-  pageConcurrency?: number;
+  pageConcurrency?: number;     // 默认 2
   pageRetryLimit?: number;
   skipFailedPages?: boolean;
+  keepAlive?: boolean;          // 默认 true
+  performanceLogging?: boolean;
 }
 ```
+
+默认性能策略：
+- `pageConcurrency` 默认从 1 调整为 2，避免全页串行，同时保持保守。
+- `maxConcurrency` 默认 10，避免对 VLM 服务盲目打满请求。
+- VLM HTTP client 默认启用 HTTP/HTTPS keep-alive agent。
+- 内容裁剪默认复用页级 RGB buffer，并以 JPEG 0.75 发送给 VLM，减少重复整页解码与 payload。
+
+常用环境变量：
+- `MINERU_SERVER_URL`、`MINERU_VL_MODEL_NAME`、`MINERU_OUTPUT_DIR`
+- `MINERU_PAGE_CONCURRENCY`、`MINERU_MAX_CONCURRENCY`
+- `MINERU_PAGE_LIMIT`、`MINERU_PERFORMANCE_LOGGING`
+- `MINERU_CROP_IMAGE_FORMAT`、`MINERU_CROP_IMAGE_QUALITY`、`MINERU_USE_PAGE_CROP_CACHE`
 
 ## 🧪 测试
 
 ```bash
 MINERU_TEST_PDF=/path/to/your.pdf npm test
 ```
+
+## 📊 Benchmark
+
+```bash
+MINERU_TEST_PDF=/path/to/your.pdf MINERU_BENCHMARK_CONCURRENCY=1,2,4 npm run benchmark
+```
+
+脚本会输出 render、layout、content、crop/save、middle_json、markdown 等阶段耗时。
 
 ## 📄 许可证
 

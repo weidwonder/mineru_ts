@@ -5,3 +5,4 @@ dist/
 mineru-ts-output/
 .venv/
 .tmp-poppler/
+.tmp-perf/

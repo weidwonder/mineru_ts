@@ -17,7 +17,11 @@ import { applyExtractedContents } from './content-extract-utils';
 import {
   MinerUClientConfig,
   ContentBlock,
+  CropImageFormat,
+  MinerUPagePerformanceMetrics,
+  MinerUPerformanceMetrics,
   ParseResult,
+  ParseFileOptions,
   PageImage,
   VLMRequestError,
   DEFAULT_PROMPTS,
@@ -25,8 +29,11 @@ import {
   DEFAULT_SYSTEM_PROMPT,
 } from './types';
 
-const DEFAULT_PAGE_CONCURRENCY = 1;
+const DEFAULT_PAGE_CONCURRENCY = 2;
 const DEFAULT_PAGE_RETRY_LIMIT = 2;
+const DEFAULT_MAX_CONCURRENCY = 10;
+const DEFAULT_CROP_IMAGE_FORMAT: CropImageFormat = 'jpeg';
+const DEFAULT_CROP_IMAGE_QUALITY = 0.75;
 const RETRYABLE_NETWORK_ERROR_PATTERN =
   /EHOSTDOWN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network error/iu;
 
@@ -45,6 +52,12 @@ export class MinerUClient {
       outputDir: config.outputDir ?? '',
       minImageEdge: config.minImageEdge ?? 28,
       maxImageEdgeRatio: config.maxImageEdgeRatio ?? 50,
+      cropImageFormat: config.cropImageFormat ?? DEFAULT_CROP_IMAGE_FORMAT,
+      cropImageQuality: this.normalizeQuality(
+        config.cropImageQuality,
+        DEFAULT_CROP_IMAGE_QUALITY
+      ),
+      usePageCropCache: config.usePageCropCache ?? true,
       samplingParams: {
         layout: { ...DEFAULT_SAMPLING_PARAMS, ...config.samplingParams?.layout },
         text: { ...DEFAULT_SAMPLING_PARAMS, ...config.samplingParams?.text },
@@ -63,7 +76,9 @@ export class MinerUClient {
       abandonParatext: config.abandonParatext ?? false,
       timeout: config.timeout ?? 600000,
       maxRetries: config.maxRetries ?? 3,
-      maxConcurrency: config.maxConcurrency ?? 100,
+      maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+      keepAlive: config.keepAlive ?? true,
+      performanceLogging: config.performanceLogging ?? false,
       pageConcurrency: this.normalizePositiveInt(
         config.pageConcurrency,
         DEFAULT_PAGE_CONCURRENCY
@@ -83,6 +98,7 @@ export class MinerUClient {
       timeout: this.config.timeout,
       maxRetries: this.config.maxRetries,
       maxConcurrency: this.config.maxConcurrency,
+      keepAlive: this.config.keepAlive,
     });
   }
 
@@ -178,6 +194,145 @@ export class MinerUClient {
     return { canvas, width, height };
   }
 
+  private encodeCanvasAsDataUri(
+    canvas: any,
+    format: CropImageFormat = this.config.cropImageFormat,
+    quality: number = this.config.cropImageQuality
+  ): string {
+    if (format === 'png') {
+      const buffer = canvas.toBuffer('image/png');
+      return `data:image/png;base64,${buffer.toString('base64')}`;
+    }
+
+    const buffer = canvas.toBuffer('image/jpeg', { quality });
+    return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+  }
+
+  private rgbImageToCanvas(image: { rgbBuffer: Buffer; width: number; height: number }): any {
+    const { createCanvas, ImageData } = require('canvas') as typeof import('canvas');
+    const rgbaBuffer = Buffer.alloc(image.width * image.height * 4);
+
+    for (
+      let sourceIndex = 0, targetIndex = 0;
+      sourceIndex < image.rgbBuffer.length;
+      sourceIndex += 3, targetIndex += 4
+    ) {
+      rgbaBuffer[targetIndex] = image.rgbBuffer[sourceIndex];
+      rgbaBuffer[targetIndex + 1] = image.rgbBuffer[sourceIndex + 1];
+      rgbaBuffer[targetIndex + 2] = image.rgbBuffer[sourceIndex + 2];
+      rgbaBuffer[targetIndex + 3] = 255;
+    }
+
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext('2d');
+    const imageData = new ImageData(
+      new Uint8ClampedArray(rgbaBuffer),
+      image.width,
+      image.height
+    );
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  private getCropPixelBox(
+    bbox: [number, number, number, number],
+    imageWidth: number,
+    imageHeight: number
+  ): { left: number; top: number; width: number; height: number } {
+    const clamp = (value: number, min: number, max: number) =>
+      Math.min(max, Math.max(min, value));
+
+    const [bboxLeft, bboxTop, bboxRight, bboxBottom] = bbox;
+    const scale = Math.max(bboxLeft, bboxTop, bboxRight, bboxBottom) <= 1.5 ? 1 : 1000;
+    const normLeft = clamp(bboxLeft, 0, scale);
+    const normTop = clamp(bboxTop, 0, scale);
+    const normRight = clamp(bboxRight, 0, scale);
+    const normBottom = clamp(bboxBottom, 0, scale);
+
+    const left = Math.floor((normLeft / scale) * imageWidth);
+    const top = Math.floor((normTop / scale) * imageHeight);
+    const right = Math.ceil((normRight / scale) * imageWidth);
+    const bottom = Math.ceil((normBottom / scale) * imageHeight);
+
+    const cropLeft = clamp(left, 0, imageWidth - 1);
+    const cropTop = clamp(top, 0, imageHeight - 1);
+    const cropRight = clamp(right, cropLeft + 1, imageWidth);
+    const cropBottom = clamp(bottom, cropTop + 1, imageHeight);
+
+    return {
+      left: cropLeft,
+      top: cropTop,
+      width: Math.max(1, cropRight - cropLeft),
+      height: Math.max(1, cropBottom - cropTop),
+    };
+  }
+
+  private cropRgbFromPageImage(
+    pageImage: PageImage,
+    bbox: [number, number, number, number]
+  ): { rgbBuffer: Buffer; width: number; height: number } | null {
+    if (!pageImage.rgbBuffer) {
+      return null;
+    }
+
+    const cropBox = this.getCropPixelBox(bbox, pageImage.width, pageImage.height);
+    const cropBuffer = Buffer.alloc(cropBox.width * cropBox.height * 3);
+    const sourceRowBytes = pageImage.width * 3;
+    const targetRowBytes = cropBox.width * 3;
+
+    for (let rowIndex = 0; rowIndex < cropBox.height; rowIndex += 1) {
+      const sourceStart =
+        (cropBox.top + rowIndex) * sourceRowBytes + cropBox.left * 3;
+      const targetStart = rowIndex * targetRowBytes;
+      pageImage.rgbBuffer.copy(
+        cropBuffer,
+        targetStart,
+        sourceStart,
+        sourceStart + targetRowBytes
+      );
+    }
+
+    return {
+      rgbBuffer: cropBuffer,
+      width: cropBox.width,
+      height: cropBox.height,
+    };
+  }
+
+  private async cropImageFromPageImage(
+    pageImage: PageImage,
+    bbox: [number, number, number, number],
+    format: CropImageFormat = this.config.cropImageFormat,
+    quality: number = this.config.cropImageQuality
+  ): Promise<string> {
+    if (!this.config.usePageCropCache) {
+      return this.cropImageFromBbox(
+        pageImage.base64,
+        bbox,
+        pageImage.width,
+        pageImage.height,
+        format,
+        quality
+      );
+    }
+
+    const croppedRgb = this.cropRgbFromPageImage(pageImage, bbox);
+    if (!croppedRgb) {
+      return this.cropImageFromBbox(
+        pageImage.base64,
+        bbox,
+        pageImage.width,
+        pageImage.height,
+        format,
+        quality
+      );
+    }
+
+    const canvas = this.rgbImageToCanvas(croppedRgb);
+    const resized = this.resizeByNeed(canvas);
+    return this.encodeCanvasAsDataUri(resized.canvas, format, quality);
+  }
+
   private buildPageImagesFromPdfium(images: PdfPageImage[]): PageImage[] {
     return images.map((image, index) => {
       const bytes = imageToBytes(image, 0.75);
@@ -189,6 +344,7 @@ export class MinerUClient {
         scale: image.scale,
         imageData: bytes,
         base64: `data:image/jpeg;base64,${base64}`,
+        rgbBuffer: image.rgbBuffer,
       };
     });
   }
@@ -234,7 +390,9 @@ export class MinerUClient {
     imageBase64: string,
     bbox: [number, number, number, number],
     imageWidth: number,
-    imageHeight: number
+    imageHeight: number,
+    format: CropImageFormat = this.config.cropImageFormat,
+    quality: number = this.config.cropImageQuality
   ): Promise<string> {
     const { createCanvas, loadImage } = await import('canvas');
 
@@ -242,46 +400,24 @@ export class MinerUClient {
     const imageBuffer = Buffer.from(base64Data, 'base64');
     const img = await loadImage(imageBuffer);
 
-    const clamp = (value: number, min: number, max: number) =>
-      Math.min(max, Math.max(min, value));
+    const cropBox = this.getCropPixelBox(bbox, imageWidth, imageHeight);
 
-    const [x0, y0, x1, y1] = bbox;
-    const scale = Math.max(x0, y0, x1, y1) <= 1.5 ? 1 : 1000;
-    const normX0 = clamp(x0, 0, scale);
-    const normY0 = clamp(y0, 0, scale);
-    const normX1 = clamp(x1, 0, scale);
-    const normY1 = clamp(y1, 0, scale);
-
-    const left = Math.floor((normX0 / scale) * imageWidth);
-    const top = Math.floor((normY0 / scale) * imageHeight);
-    const right = Math.ceil((normX1 / scale) * imageWidth);
-    const bottom = Math.ceil((normY1 / scale) * imageHeight);
-
-    const cropLeft = clamp(left, 0, imageWidth - 1);
-    const cropTop = clamp(top, 0, imageHeight - 1);
-    const cropRight = clamp(right, cropLeft + 1, imageWidth);
-    const cropBottom = clamp(bottom, cropTop + 1, imageHeight);
-
-    const cropWidth = Math.max(1, cropRight - cropLeft);
-    const cropHeight = Math.max(1, cropBottom - cropTop);
-
-    const canvas = createCanvas(cropWidth, cropHeight);
+    const canvas = createCanvas(cropBox.width, cropBox.height);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(
       img,
-      cropLeft,
-      cropTop,
-      cropWidth,
-      cropHeight,
+      cropBox.left,
+      cropBox.top,
+      cropBox.width,
+      cropBox.height,
       0,
       0,
-      cropWidth,
-      cropHeight
+      cropBox.width,
+      cropBox.height
     );
 
     const resized = this.resizeByNeed(canvas);
-    const croppedBuffer = resized.canvas.toBuffer('image/png');
-    return `data:image/png;base64,${croppedBuffer.toString('base64')}`;
+    return this.encodeCanvasAsDataUri(resized.canvas, format, quality);
   }
 
   /**
@@ -295,9 +431,11 @@ export class MinerUClient {
     const fs = await import('fs/promises');
     const path = await import('path');
 
-    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const mimeMatch = imageBase64.match(/^data:image\/([\w.+-]+);base64,/u);
+    const extension = mimeMatch?.[1] === 'jpeg' ? 'jpg' : (mimeMatch?.[1] ?? 'png');
+    const base64Data = imageBase64.replace(/^data:image\/[\w.+-]+;base64,/, '');
     const hash = crypto.createHash('sha256').update(base64Data).digest('hex');
-    const filename = `${hash}.png`;
+    const filename = `${hash}.${extension}`;
 
     const imagesDir = path.join(outputDir, 'images');
     await fs.mkdir(imagesDir, { recursive: true });
@@ -377,48 +515,67 @@ export class MinerUClient {
   /**
    * 两步提取（布局检测 + 内容提取）
    */
-  async twoStepExtract(pageImage: PageImage): Promise<ContentBlock[]> {
+  async twoStepExtract(
+    pageImage: PageImage,
+    performance?: MinerUPerformanceMetrics
+  ): Promise<ContentBlock[]> {
     const startTime = Date.now();
+    const pageMetrics: MinerUPagePerformanceMetrics = {
+      pageIndex: pageImage.pageIndex,
+      totalMs: 0,
+      layoutMs: 0,
+      cropMs: 0,
+      contentMs: 0,
+      imageSaveMs: 0,
+      postProcessMs: 0,
+      blocks: 0,
+      extractedBlocks: 0,
+      savedImages: 0,
+    };
 
     // Step 1: 布局检测
     console.log(`[Page ${pageImage.pageIndex}] Layout detection...`);
+    let phaseStart = Date.now();
     const blocks = await this.layoutDetect(pageImage.base64);
+    pageMetrics.layoutMs = Date.now() - phaseStart;
+    pageMetrics.blocks = blocks.length;
     console.log(`[Page ${pageImage.pageIndex}] Found ${blocks.length} blocks`);
 
     // Step 2: 内容提取（裁剪图像后批量提取）
     console.log(`[Page ${pageImage.pageIndex}] Content extraction...`);
     const skipTypes = new Set(['image', 'list', 'equation_block']);
     const extractBlocks = blocks.filter((block) => !skipTypes.has(block.type));
+    pageMetrics.extractedBlocks = extractBlocks.length;
+    phaseStart = Date.now();
     const extractRequests = await Promise.all(
       extractBlocks.map(async (block) => {
-        const croppedImage = await this.cropImageFromBbox(
-          pageImage.base64,
-          block.bbox,
-          pageImage.width,
-          pageImage.height
-        );
+        const croppedImage = await this.cropImageFromPageImage(pageImage, block.bbox);
         return {
           imageBase64: croppedImage,
           blockType: block.type,
         };
       })
     );
+    pageMetrics.cropMs = Date.now() - phaseStart;
 
     if (extractRequests.length > 0) {
+      phaseStart = Date.now();
       const contents = await this.batchContentExtract(extractRequests);
+      pageMetrics.contentMs = Date.now() - phaseStart;
       applyExtractedContents(blocks, skipTypes, contents);
     }
 
     // Step 3: 保存图像块
     if (this.config.outputDir) {
       const imageBlocks = blocks.filter((block) => block.type === 'image');
+      pageMetrics.savedImages = imageBlocks.length;
+      phaseStart = Date.now();
       await Promise.all(
         imageBlocks.map(async (block) => {
-          const croppedImage = await this.cropImageFromBbox(
-            pageImage.base64,
+          const croppedImage = await this.cropImageFromPageImage(
+            pageImage,
             block.bbox,
-            pageImage.width,
-            pageImage.height
+            'png'
           );
           block.image_path = await this.saveBlockImage(
             croppedImage,
@@ -426,17 +583,22 @@ export class MinerUClient {
           );
         })
       );
+      pageMetrics.imageSaveMs = Date.now() - phaseStart;
     }
 
     // Step 4: 后处理
+    phaseStart = Date.now();
     const processed = postProcessBlocks(blocks, {
       simplePostProcess: this.config.simplePostProcess,
       handleEquationBlock: this.config.handleEquationBlock,
       abandonList: this.config.abandonList,
       abandonParatext: this.config.abandonParatext,
     });
+    pageMetrics.postProcessMs = Date.now() - phaseStart;
 
     const elapsed = Date.now() - startTime;
+    pageMetrics.totalMs = elapsed;
+    this.recordPagePerformance(performance, pageMetrics);
     console.log(`[Page ${pageImage.pageIndex}] Completed in ${elapsed}ms`);
 
     return processed;
@@ -445,7 +607,10 @@ export class MinerUClient {
   /**
    * 批量两步提取
    */
-  async batchTwoStepExtract(pageImages: PageImage[]): Promise<ContentBlock[][]> {
+  async batchTwoStepExtract(
+    pageImages: PageImage[],
+    performance?: MinerUPerformanceMetrics
+  ): Promise<ContentBlock[][]> {
     const results: ContentBlock[][] = new Array(pageImages.length);
     const pageConcurrency = this.config.pageConcurrency;
 
@@ -455,7 +620,7 @@ export class MinerUClient {
         batch.map(async (pageImage, offset) => {
           const pageIndex = i + offset;
           try {
-            results[pageIndex] = await this.runPageWithRetry(pageImage);
+            results[pageIndex] = await this.runPageWithRetry(pageImage, performance);
           } catch (error) {
             if (this.config.skipFailedPages && this.isRetryablePageError(error)) {
               const detail = error instanceof Error ? error.message : String(error);
@@ -472,11 +637,14 @@ export class MinerUClient {
     return results;
   }
 
-  private async runPageWithRetry(pageImage: PageImage): Promise<ContentBlock[]> {
+  private async runPageWithRetry(
+    pageImage: PageImage,
+    performance?: MinerUPerformanceMetrics
+  ): Promise<ContentBlock[]> {
     let lastError: unknown = null;
     for (let attempt = 0; attempt <= this.config.pageRetryLimit; attempt += 1) {
       try {
-        return await this.twoStepExtract(pageImage);
+        return await this.twoStepExtract(pageImage, performance);
       } catch (error) {
         lastError = error;
         if (!this.isRetryablePageError(error) || attempt >= this.config.pageRetryLimit) {
@@ -537,45 +705,114 @@ export class MinerUClient {
     return fallback;
   }
 
+  private normalizeQuality(value: unknown, fallback: number): number {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1) {
+      return value;
+    }
+    return fallback;
+  }
+
+  private createPerformanceMetrics(): MinerUPerformanceMetrics {
+    return {
+      totalMs: 0,
+      readMs: 0,
+      renderMs: 0,
+      pageImageEncodeMs: 0,
+      layoutMs: 0,
+      cropMs: 0,
+      contentMs: 0,
+      imageSaveMs: 0,
+      postProcessMs: 0,
+      middleJsonMs: 0,
+      markdownMs: 0,
+      pages: [],
+    };
+  }
+
+  private recordPagePerformance(
+    performance: MinerUPerformanceMetrics | undefined,
+    pageMetrics: MinerUPagePerformanceMetrics
+  ): void {
+    if (!performance) {
+      return;
+    }
+
+    performance.pages.push(pageMetrics);
+    performance.layoutMs += pageMetrics.layoutMs;
+    performance.cropMs += pageMetrics.cropMs;
+    performance.contentMs += pageMetrics.contentMs;
+    performance.imageSaveMs += pageMetrics.imageSaveMs;
+    performance.postProcessMs += pageMetrics.postProcessMs;
+  }
+
+  private printPerformanceSummary(performance: MinerUPerformanceMetrics): void {
+    if (!this.config.performanceLogging) {
+      return;
+    }
+
+    console.log('=== MinerU Performance ===');
+    console.log(`total=${performance.totalMs}ms`);
+    console.log(`read=${performance.readMs}ms render=${performance.renderMs}ms encode=${performance.pageImageEncodeMs}ms`);
+    console.log(`layout=${performance.layoutMs}ms crop=${performance.cropMs}ms content=${performance.contentMs}ms`);
+    console.log(`imageSave=${performance.imageSaveMs}ms postProcess=${performance.postProcessMs}ms`);
+    console.log(`middleJson=${performance.middleJsonMs}ms markdown=${performance.markdownMs}ms`);
+  }
+
   /**
    * 解析 PDF 文件
    */
-  async parseFile(pdfPath: string): Promise<ParseResult> {
+  async parseFile(pdfPath: string, options: ParseFileOptions = {}): Promise<ParseResult> {
     const startTime = Date.now();
+    const performance = this.createPerformanceMetrics();
 
     const fs = await import('fs/promises');
+    let phaseStart = Date.now();
     const pdfBytes = await fs.readFile(pdfPath);
+    performance.readMs = Date.now() - phaseStart;
     console.log('Loading PDF...');
+    phaseStart = Date.now();
+    const pageLimit = this.normalizeNonNegativeInt(options.pageLimit, 0);
     const { images, pdfDoc, pdfLib } = await loadImagesFromPdfBytes(
       pdfBytes,
-      this.config.dpi
+      this.config.dpi,
+      0,
+      pageLimit > 0 ? pageLimit - 1 : null
     );
+    performance.renderMs = Date.now() - phaseStart;
+    phaseStart = Date.now();
     const pageImages = this.buildPageImagesFromPdfium(images);
+    performance.pageImageEncodeMs = Date.now() - phaseStart;
     console.log(`Loaded ${pageImages.length} pages`);
 
-    console.log('Processing pages...');
-    const pageBlocks = await this.batchTwoStepExtract(pageImages);
     const imageWriter = await this.createImageWriter(this.config.outputDir);
+    console.log('Processing pages...');
+    const pageBlocks = await this.batchTwoStepExtract(pageImages, performance);
 
     let middleJson: any;
     try {
       const normalizedBlocks = pageBlocks.map((blocks) =>
         this.normalizeBlocksToUnit(blocks)
       );
+      phaseStart = Date.now();
       middleJson = resultToMiddleJson(
         normalizedBlocks,
         images,
         pdfDoc,
         imageWriter
       );
+      performance.middleJsonMs = Date.now() - phaseStart;
     } finally {
       pdfDoc.destroy();
       pdfLib.destroy();
     }
 
+    phaseStart = Date.now();
     const markdown =
       unionMake(middleJson.pdf_info, MakeMode.MM_MD, 'images') || '';
+    performance.markdownMs = Date.now() - phaseStart;
     const processingTime = Date.now() - startTime;
+    performance.totalMs = processingTime;
+    this.printPerformanceSummary(performance);
 
     return {
       pages: pageImages.map((img, idx) => ({
@@ -587,6 +824,7 @@ export class MinerUClient {
       metadata: {
         totalPages: pageImages.length,
         processingTime,
+        performance,
       },
     };
   }
@@ -594,40 +832,54 @@ export class MinerUClient {
   /**
    * 解析 PDF Buffer
    */
-  async parseBuffer(pdfBuffer: Buffer): Promise<ParseResult> {
+  async parseBuffer(pdfBuffer: Buffer, options: ParseFileOptions = {}): Promise<ParseResult> {
     const startTime = Date.now();
+    const performance = this.createPerformanceMetrics();
 
     console.log('Loading PDF buffer...');
+    let phaseStart = Date.now();
+    const pageLimit = this.normalizeNonNegativeInt(options.pageLimit, 0);
     const { images, pdfDoc, pdfLib } = await loadImagesFromPdfBytes(
       pdfBuffer,
-      this.config.dpi
+      this.config.dpi,
+      0,
+      pageLimit > 0 ? pageLimit - 1 : null
     );
+    performance.renderMs = Date.now() - phaseStart;
+    phaseStart = Date.now();
     const pageImages = this.buildPageImagesFromPdfium(images);
+    performance.pageImageEncodeMs = Date.now() - phaseStart;
     console.log(`Loaded ${pageImages.length} pages`);
 
-    console.log('Processing pages...');
-    const pageBlocks = await this.batchTwoStepExtract(pageImages);
     const imageWriter = await this.createImageWriter(this.config.outputDir);
+    console.log('Processing pages...');
+    const pageBlocks = await this.batchTwoStepExtract(pageImages, performance);
 
     let middleJson: any;
     try {
       const normalizedBlocks = pageBlocks.map((blocks) =>
         this.normalizeBlocksToUnit(blocks)
       );
+      phaseStart = Date.now();
       middleJson = resultToMiddleJson(
         normalizedBlocks,
         images,
         pdfDoc,
         imageWriter
       );
+      performance.middleJsonMs = Date.now() - phaseStart;
     } finally {
       pdfDoc.destroy();
       pdfLib.destroy();
     }
 
+    phaseStart = Date.now();
     const markdown =
       unionMake(middleJson.pdf_info, MakeMode.MM_MD, 'images') || '';
+    performance.markdownMs = Date.now() - phaseStart;
     const processingTime = Date.now() - startTime;
+    performance.totalMs = processingTime;
+    this.printPerformanceSummary(performance);
 
     return {
       pages: pageImages.map((img, idx) => ({
@@ -639,6 +891,7 @@ export class MinerUClient {
       metadata: {
         totalPages: pageImages.length,
         processingTime,
+        performance,
       },
     };
   }
